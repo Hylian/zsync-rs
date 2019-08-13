@@ -1,0 +1,11 @@
+[package]
+name = "zsync"
+version = "0.1.0"
+authors = ["Edward Shin <contact@edwardsh.in>"]
+edition = "2018"
+
+[dependencies]
+fnv = "1.0.6"
+libc = "0.2"
+md4 = "0.8.0"
+snafu = "0.4.4"
