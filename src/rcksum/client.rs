@@ -28,6 +28,8 @@ struct Context {
 
 impl Context {
     pub fn new(config: Config, num_blocks: usize, output_path: &Path) -> Result<Self> {
+        assert!(config.seq_matches >= 1);
+
         // Create an empty file to fill in
         let mut file = File::create(output_path)?;
         for _i in 0..num_blocks * config.blocksize {
@@ -105,6 +107,7 @@ impl Context {
         let limit = data.len() - (self.config.blocksize * self.config.seq_matches);
         let mut data = DataWindow::new(self.config.blocksize, limit, data);
 
+        /*
         if self.offset > 0 {
             println!("Advancing by {} bytes!", self.skip_bytes);
             data.advance_n_bytes(self.skip_bytes)?;
@@ -118,70 +121,30 @@ impl Context {
                 self.rsums[1] = Rsum::calculate(data.get_nth_block(1).unwrap());
             }
         }
+        */
+        /////////////
+        self.rsums[0] = Rsum::calculate(data.get_cur_block());
+        if self.config.seq_matches > 1 {
+            self.rsums[1] = Rsum::calculate(data.get_nth_block(1).unwrap());
+        }
+        /////////////
+        
         self.skip_bytes = 0;
 
         let mut got_blocks = 0;
 
         // Search through until we get a block hit
-        'outer: loop {
-            let mut blocks_matched = 0;
+        loop {
+            println!("Considering block: {:#?}", data.get_cur_block());
+            let blocks_found = self.check_block_match(data.get_cur_block())?;
+            if let Some(b) = blocks_found {
+                self.write_blocks(&b, data.get_cur_block())?;
+                got_blocks += b.len();
+                // TODO make sure next match doesn't go over
+                //self.next_match = Some(b.iter().min().unwrap()+1);
+                println!("Matched {} blocks!", b.len());
 
-            /*
-            if self.config.seq_matches > 1 {
-                if let Some(e) = self.next_match {
-                    let blocks_found = self.check_block_match(data.get_cur_block())?;
-                    if let Some(b) = blocks_found {
-                        self.write_blocks(&b, data.get_cur_block())?;
-                        blocks_matched = 1;
-                        got_blocks += b.len();
-                    }
-                }
-            }
-            */
-
-            // Advance byte-by-byte through the data looking for a hit
-            'inner: loop {
-                let blocks_found = self.check_block_match(data.get_cur_block())?;
-                if let Some(b) = blocks_found {
-                    self.write_blocks(&b, data.get_cur_block())?;
-                    blocks_matched = self.config.seq_matches;
-                    got_blocks += b.len();
-                    // TODO make sure next match doesn't go over
-                    self.next_match = Some(b.iter().min().unwrap()+1);
-                    println!("Matched {} blocks!", b.len());
-                    break 'inner;
-                } else {
-                    println!("No match!");
-                    // We didn't match any data, advance the window by one byte and update the
-                    // rolling checksum.
-                    let nc = if let Ok(next_block) = data.get_nth_block(1) {
-                        next_block[0]
-                    } else {
-                        break 'outer;
-                    };
-                    let oc = data.get_cur_block()[0];
-
-                    self.rsums[0].update(oc, nc, self.blockshift);
-                    if self.config.seq_matches > 1 {
-                        let nnc = if let Ok(next_next_block) = data.get_nth_block(2) {
-                            next_next_block[0]
-                        } else {
-                            break 'outer;
-                        };
-                        self.rsums[1].update(nc, nnc, self.blockshift);
-                    }
-
-                    println!("Advancing by one byte!");
-                    if data.advance_byte().is_err() {
-                        break 'outer;
-                    }
-                }
-            }
-
-            // Advance by some number of blocks, depending on the number we've matched so far.
-            if blocks_matched > 0 {
-                println!("{} blocks matched!", blocks_matched);
-                let result = if blocks_matched == 1 {
+                let result = if self.config.seq_matches == 1 {
                     println!("Incrementing by 1 block");
                     data.advance_n_blocks(1)
                 } else {
@@ -194,7 +157,7 @@ impl Context {
                     break;
                 }
 
-                self.rsums[0] = if self.config.seq_matches > 1 && blocks_matched == 1 {
+                self.rsums[0] = if self.config.seq_matches > 1 && self.config.seq_matches == 1 {
                     self.rsums[1]
                 } else {
                     Rsum::calculate(data.get_cur_block())
@@ -203,6 +166,39 @@ impl Context {
                 if self.config.seq_matches > 1 {
                     self.rsums[1] = Rsum::calculate(data.get_nth_block(1).unwrap());
                 }
+            } else {
+                println!("No match!");
+                // We didn't match any data, advance the window by one byte and update the
+                // rolling checksum.
+                let nc = if let Ok(next_block) = data.get_nth_block(1) {
+                    next_block[0]
+                } else {
+                    println!("Hit limit, exiting!");
+                    break;
+                };
+                let oc = data.get_cur_block()[0];
+
+                println!("Updating Rsums!");
+                self.rsums[0].update(oc, nc, self.config.blocksize as u8);
+                if self.config.seq_matches > 1 {
+                    let nnc = if let Ok(next_next_block) = data.get_nth_block(2) {
+                        next_next_block[0]
+                    } else {
+                        println!("Hit limit, exiting!");
+                        break;
+                    };
+                    self.rsums[1].update(nc, nnc, self.config.blocksize as u8);
+                }
+
+                println!("Advancing by one byte!");
+                if data.advance_byte().is_err() {
+                    println!("Hit limit, exiting!");
+                    break;
+                }
+
+                dbg!(Rsum::calculate(data.get_cur_block()));
+                dbg!(self.rsums[0]);
+                assert!(self.rsums[0] == Rsum::calculate(data.get_cur_block()));
             }
         }
 
@@ -235,63 +231,40 @@ mod tests {
 
     #[test]
     fn rcksum_sanity() {
+        let block_1 = ZBlock {
+            rsum: Rsum::calculate(&[1; 16]), //(16, 136)
+            checksum: PartialChecksum {
+                value: MD4Digest::calculate(&[1; 16]).into(),
+                length: 5,
+            }
+        };
+
+        let block_2 = ZBlock {
+            rsum: Rsum::calculate(&[2; 16]), //(32, 2)
+            checksum: PartialChecksum {
+                value: MD4Digest::calculate(&[2; 16]).into(),
+                length: 5,
+            }
+        };
+        let block_3 = ZBlock {
+            rsum: Rsum::calculate(&[3; 16]), //(48, 168)
+            checksum: PartialChecksum {
+                value: MD4Digest::calculate(&[3; 16]).into(),
+                length: 5,
+            }
+        };
+
         let block_list = vec![
-            ZBlock {
-                rsum: Rsum(32, 254),
-                checksum: PartialChecksum {
-                    value: [39, 240, 238, 55, 4, 210, 113, 29, 186, 83, 85, 226, 140, 15, 15, 102].into(),
-                    length: 5,
-                }
-            },
-            ZBlock {
-                rsum: Rsum(16, 16),
-                checksum: PartialChecksum {
-                    value: [147, 172, 48, 114, 97, 52, 72, 229, 120, 97, 181, 5, 207, 11, 54, 128].into(),
-                    length: 5,
-                }
-            },
-            ZBlock {
-                rsum: Rsum(16, 16),
-                checksum: PartialChecksum {
-                    value: [147, 172, 48, 114, 97, 52, 72, 229, 120, 97, 181, 5, 207, 11, 54, 128].into(),
-                    length: 5,
-                }
-            },
-            ZBlock {
-                rsum: Rsum(16, 16),
-                checksum: PartialChecksum {
-                    value: [147, 172, 48, 114, 97, 52, 72, 229, 120, 97, 181, 5, 207, 11, 54, 128].into(),
-                    length: 5,
-                }
-            },
-            ZBlock {
-                rsum: Rsum(32, 254),
-                checksum: PartialChecksum {
-                    value: [39, 240, 238, 55, 4, 210, 113, 29, 186, 83, 85, 226, 140, 15, 15, 102].into(),
-                    length: 5,
-                }
-            },
-            ZBlock {
-                rsum: Rsum(48, 78),
-                checksum: PartialChecksum {
-                    value: [4, 181, 10, 196, 178, 153, 72, 158, 149, 46, 208, 24, 41, 24, 145, 14].into(),
-                    length: 5,
-                }
-            },
-            ZBlock {
-                rsum: Rsum(48, 78),
-                checksum: PartialChecksum {
-                    value: [4, 181, 10, 196, 178, 153, 72, 158, 149, 46, 208, 24, 41, 24, 145, 14].into(),
-                    length: 5,
-                }
-            },
-            ZBlock {
-                rsum: Rsum(48, 78),
-                checksum: PartialChecksum {
-                    value: [4, 181, 10, 196, 178, 153, 72, 158, 149, 46, 208, 24, 41, 24, 145, 14].into(),
-                    length: 5,
-                }
-            },
+            block_1,
+            block_2,
+            block_2,
+            block_2,
+            block_1,
+            block_3,
+            block_3,
+            block_3,
+            block_3,
+            block_1,
         ];
 
         let config = Config {
@@ -306,24 +279,32 @@ mod tests {
         }
 
         // Try some incorrect blocks
-        client.submit_source_data(&[99; 16]).unwrap();
-        client.submit_remote_block(0, &[99; 16]).unwrap();
-        client.submit_remote_block(7, &[99; 16]).unwrap();
+        //client.submit_source_data(&[99; 16]).unwrap();
+        //client.submit_remote_block(0, &[99; 16]).unwrap();
+        //client.submit_remote_block(7, &[99; 16]).unwrap();
 
         // Add correct blocks
-        //client.submit_source_data(&[2; 16]).unwrap();
         //client.submit_source_data(&[1; 16]).unwrap();
+        //client.submit_source_data(&[2; 16]).unwrap();
+        //client.submit_source_data(&[3; 16]).unwrap();
         //client.submit_remote_block(5, &[3; 16]).unwrap();
         let mut concat_vec = Vec::new();
+        concat_vec.push(9);
+        concat_vec.push(9);
+        
         for _i in 0..16 {
             concat_vec.push(1);
         }
+        concat_vec.push(0);
+        concat_vec.push(2);
+        //concat_vec.push(0);
         for _i in 0..16 {
             concat_vec.push(2);
         }
         for _i in 0..16 {
             concat_vec.push(3);
         }
+        
         client.submit_source_data(&concat_vec).unwrap();
     }
 }

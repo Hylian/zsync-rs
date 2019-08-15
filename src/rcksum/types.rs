@@ -3,7 +3,7 @@ use std::num::Wrapping;
 use md4::{Md4, Digest};
 
 #[derive(Copy, Clone, Debug, Default)]
-pub struct Rsum(pub u8, pub u8);
+pub struct Rsum(pub u16, pub u16);
 
 impl PartialEq for Rsum {
     #[inline]
@@ -23,20 +23,29 @@ impl Hash for Rsum {
 
 impl Rsum {
     // Calculate the checksum of a block
+    #[inline]
     pub fn calculate(data: &[u8]) -> Self {
-        let result = data.iter().fold((Rsum(0, 0), data.len() as u8), |acc, x| {
+        let result = data.iter().fold((Rsum(0, 0), data.len() as u16), |acc, x| {
             let a = Wrapping((acc.0).0);
             let b = Wrapping((acc.0).1);
-            let o = Wrapping(acc.1);
-            let x = Wrapping(*x);
-            (Rsum((a + x).0, ((b + o) * x).0), x.0 - 1)
+            let len = Wrapping(acc.1);
+            let x = Wrapping((*x).into());
+            (Rsum((a + x).0, (b + (len * x)).0), acc.1 - 1)
         });
+        assert!(result.1 == 0);
         result.0
     }
 
     // Update the rolling checksum with the next byte
-    pub fn update(self, old: u8, new: u8, blockshift: i32) -> Self {
-        Rsum(new - old, self.1 + self.0 - (old << blockshift))
+    #[inline]
+    pub fn update(&mut self, old: u8, new: u8, blocksize: u8) {
+        let old = Wrapping(<u16>::from(old));
+        let new = Wrapping(<u16>::from(new));
+        let blocksize = Wrapping(<u16>::from(blocksize));
+        let a = Wrapping(self.0) - old + new;
+        let b = Wrapping(self.1) - (old * blocksize) + a;
+        self.0 = a.0;
+        self.1 = b.0;
     }
 }
 
