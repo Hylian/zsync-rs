@@ -170,18 +170,21 @@ impl Context {
                 println!("No match!");
                 // We didn't match any data, advance the window by one byte and update the
                 // rolling checksum.
-                let nc = if let Ok(next_block) = data.get_nth_block(1) {
-                    next_block[0]
-                } else {
+                let oc = data.get_cur_block()[0];
+                println!("Advancing by one byte!");
+                if data.advance_byte().is_err() {
                     println!("Hit limit, exiting!");
                     break;
-                };
-                let oc = data.get_cur_block()[0];
+                }
 
                 println!("Updating Rsums!");
+                let nc = {
+                    let new_block = data.get_cur_block();
+                    new_block[new_block.len() - 1]
+                };
                 self.rsums[0].update(oc, nc, self.config.blocksize as u8);
                 if self.config.seq_matches > 1 {
-                    let nnc = if let Ok(next_next_block) = data.get_nth_block(2) {
+                    let nnc = if let Ok(next_next_block) = data.get_nth_block(1) {
                         next_next_block[0]
                     } else {
                         println!("Hit limit, exiting!");
@@ -190,14 +193,6 @@ impl Context {
                     self.rsums[1].update(nc, nnc, self.config.blocksize as u8);
                 }
 
-                println!("Advancing by one byte!");
-                if data.advance_byte().is_err() {
-                    println!("Hit limit, exiting!");
-                    break;
-                }
-
-                dbg!(Rsum::calculate(data.get_cur_block()));
-                dbg!(self.rsums[0]);
                 assert!(self.rsums[0] == Rsum::calculate(data.get_cur_block()));
             }
         }
