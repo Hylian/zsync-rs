@@ -228,7 +228,7 @@ mod tests {
                     result.get(&PartialChecksum {
                         value: [1, 2, 3, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0].into(),
                         length: 5,
-                    }).unwrap();
+                    });
                 }
             }
 
